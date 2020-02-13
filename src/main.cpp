@@ -6,8 +6,11 @@
 #include <WiFiUdp.h>
 #include <ArduinoOTA.h>
 #include <EEPROM.h>
-#include <font.h>
 #include <SSD1306Wire.h>
+#include <Ticker.h>
+
+#include <config.h>
+#include <font.h>  // Dialog_plain_13
 
 #ifdef ESP32
     #include <WiFi.h>
@@ -17,18 +20,10 @@
 
 #include <MovingAverageFloat.h>
 
-#define EEPROM_SIZE 4
-
-#ifndef STASSID
-#define STASSID "XXXXX"
-#define STAPSK  "XXXXX"
-#endif
-
-const char* ssid = STASSID;
-const char* password = STAPSK;
+#define EEPROM_SIZE 4  // holds only targetTemp atm
 
 const char* clientId = "incubator";
-const char* mqttServer = "192.168.178.91";
+const char* mqttServer = "192.168.178.113";
 const int mqttPort = 1883;
 
 const char* topicTargetTemp = "incubator/target_temp";
@@ -39,17 +34,21 @@ const char* topicKD = "incubator/kd";
 const char* topicKI = "incubator/ki";
 const char* topicOn = "incubator/on";
 
-const IPAddress ip(192, 168, 178, 97);
-const IPAddress fritzbox(192, 168, 178, 1);
-const IPAddress subnet(255, 255, 255, 0);
+// const IPAddress ip(192, 168, 178, 97);
+// const IPAddress fritzbox(192, 168, 178, 1);
+// const IPAddress subnet(255, 255, 255, 0);
 
 WiFiClient espClient;
 PubSubClient mqttClient(espClient);
 
-const int oledSDA = 0;
-const int oledSCL = 2;
-const int heaterPin = 5;
-const int tempSensorPin= 4;
+const uint8_t oledSDA = 0;
+const uint8_t oledSCL = 2;
+
+const uint8_t heaterPin = 5;
+const uint8_t tempSensorPin= 4;
+const uint8_t fanTachoPin= 15;
+
+long counter = 0;
 
 #ifdef ESP32
     const int ledChannel = 0;
@@ -57,15 +56,17 @@ const int tempSensorPin= 4;
     const int resolution = 8;
 #endif
 
-int onState = 1;
+bool onState = true;
 
+const uint8_t shutdownTemperature = 50;
 double lastHeaterVal = 0;
 double heaterVal = 0;
-double targetTemp = 34.00;
+double targetTemp = 34.00;  // this will be written to flash when changed over MQTT
 double measuredTemp = 0;
 double currentTemp = 0;
 double lastTemp = 0;
-int heaterPercent = 0;
+uint8_t lastHeaterPercent = 0;
+uint8_t heaterPercent = 0;
 
 const int oneWireBus = tempSensorPin;
 OneWire oneWire(oneWireBus);
@@ -75,37 +76,71 @@ MovingAverageFloat <8> filter;
 
 // PID settings
 #define OUTPUT_MIN 0
-
 #ifdef ESP32
     #define OUTPUT_MAX 255
 #else
     #define OUTPUT_MAX 1023
 #endif
 
+bool wifiIconVisible = false;
+static unsigned char wifiIconBits[] = {
+   0x7c, 0x00, 0x82, 0x00, 0x39, 0x01, 0x44, 0x00, 0x92, 0x00, 0x38, 0x00,
+   0x38, 0x00, 0x10, 0x00 };
+
 float kp = 850.0;
 float kd = 250.0;
 float ki = 0.1;
 
-unsigned long previousMillisHistory = 0;
-unsigned long historyInterval = 4000;
+void mqttReconnect();
+void measureTemp();
+void checkFan();
+void drawGraph();
+void reportStatus();
+void flashWifi();
 
-unsigned long previousMillisTemp = 0;
-unsigned long tempInterval = 760;
-
-unsigned long previousMillisFanCheck = 0;
-unsigned long fanCheckInterval = 4000;
+uint8_t tickerCount = 6;
+Ticker tickers[] = {
+    Ticker(mqttReconnect, 60 * 1000),
+    Ticker(measureTemp, 1 * 1000),
+    Ticker(checkFan, 4 * 1000),
+    // Ticker timerDrawGraph(drawGraph, 1 * 1000);
+    Ticker(drawGraph, 1 * 5000),
+    Ticker(reportStatus, 10 * 1000),
+    Ticker(flashWifi, 1000)
+};
 
 AutoPID heaterPID(&currentTemp, &targetTemp, &heaterVal, OUTPUT_MIN, OUTPUT_MAX, kp, ki, kd);
 SSD1306Wire display(0x3c, oledSDA, oledSCL);
 
 const uint8_t displayWidth = 128;
 const uint8_t displayHeight = 64;
-const int tempHistorySize = displayWidth - 2;
-const uint8_t graphHeight = 17;
+const uint8_t graphWidth = 128;
+const uint8_t graphHeight = 46;
+const uint8_t graphX = 0;
+const uint8_t graphY = 18;
 
+uint8_t displayLowerTemp = 15;
+uint8_t displayUpperTemp = 40;
+const uint8_t tempHistorySize = graphWidth - 2; // without 2 pixels for the frame
 int tempHistory[tempHistorySize];
 
-void publish(char* topic, double value, bool retained=false) {
+void publish(String topic) {
+}
+
+void publish(char* topic, double value, bool retained=true) {
+	Serial.print("publish: ");
+	Serial.println(value);
+
+	String tempStr = String(value);
+
+	char buffer[50];
+	tempStr.toCharArray(buffer, tempStr.length() + 1);
+
+	mqttClient.publish(topic, buffer, retained);
+	mqttClient.loop();
+}
+
+void publish(char* topic, int value, bool retained=true) {
 	Serial.print("publish: ");
 	Serial.println(value);
 
@@ -117,7 +152,7 @@ void publish(char* topic, double value, bool retained=false) {
 	mqttClient.loop();
 }
 
-void publish(char* topic, int value, bool retained=false) {
+void publish(char* topic, char* value, bool retained=true) {
 	Serial.print("publish: ");
 	Serial.println(value);
 
@@ -129,16 +164,14 @@ void publish(char* topic, int value, bool retained=false) {
 	mqttClient.loop();
 }
 
-void publish(char* topic, char* value, bool retained=false) {
-	Serial.print("publish: ");
-	Serial.println(value);
-
-	String tempStr = String(value);
-	char buffer[50];
-	tempStr.toCharArray(buffer, tempStr.length() + 1);
-
-	mqttClient.publish(topic, buffer, retained);
-	mqttClient.loop();
+void setOnState(bool state) {
+    if(state) {
+        onState = true;
+    } else {
+        heaterPID.stop();
+        heaterVal = 0;
+        onState = false;
+    }
 }
 
 void mqttCallback(char* topic, byte* payload, unsigned int length) {
@@ -154,44 +187,39 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
 	    targetTemp = atof((char*)payload);  
         if(targetTemp > 50) {
             return;
+        } else if(targetTemp < 1) {
+            setOnState(false);
+        } else {
+            setOnState(true);
         }
+
         EEPROM.write(0, targetTemp);
         EEPROM.commit();
 		publish((char *)"incubator/_echo/target_temp", targetTemp);
 	}
 
 	else if(strcmp(topic, topicOn) == 0) {
-	    onState = atoi((char*)payload);
+	    bool state = atoi((char*)payload) > 0;
+        setOnState(state);
 		publish((char *)"incubator/_echo/on", onState);
-
-		if(onState == 1) {
-			heaterPID.run();
-		} else {
-			heaterPID.stop();
-            #ifdef ESP32
-                ledcWrite(ledChannel, 0);
-            #else
-                analogWrite(heaterPin, 0);
-            #endif
-		}
 	}
 
 	else if(strcmp(topic, topicKP) == 0) {
 	    kp = atof((char*)payload);
-		publish((char *)"incubator/_echo/kp", kp);
 		heaterPID.setGains(kp, ki, kd);
+		publish((char *)"incubator/_echo/kp", kp);
 	}
 
 	else if(strcmp(topic, topicKD) == 0) {
 	    kd = atof((char*)payload);
-		publish((char *)"incubator/_echo/kd", kd);
 		heaterPID.setGains(kp, ki, kd);
+		publish((char *)"incubator/_echo/kd", kd);
 	}
 
 	else if(strcmp(topic, topicKI) == 0) {
 	    ki = atof((char*)payload);
-		publish((char *)"incubator/_echo/ki", ki);
 		heaterPID.setGains(kp, ki, kd);
+		publish((char *)"incubator/_echo/ki", ki);
 	}
 
 	else if(strcmp(topic, topicReset) == 0) {
@@ -208,16 +236,15 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
     // mqttClient.loop();
 }
 
-void reconnect() {
-    while (!mqttClient.connected()) {
-        Serial.print("Attempting MQTT connection...");
-        if (mqttClient.connect(clientId)) {
-            Serial.println("connected");
-        } else {
-            Serial.print("failed, rc=");
-            Serial.print(mqttClient.state());
-            delay(1000);
-        }
+void mqttReconnect() {
+    if(mqttClient.connected()) return;
+
+    Serial.print("Attempting MQTT connection...");
+    if (mqttClient.connect(clientId)) {
+        Serial.println("connected");
+    } else {
+        Serial.print("failed, rc=");
+        Serial.print(mqttClient.state());
     }
     mqttClient.subscribe(topicTargetTemp);
     mqttClient.subscribe(topicCommand);
@@ -265,26 +292,41 @@ void setupOTA() {
     ArduinoOTA.begin();
 }
 
+ICACHE_RAM_ATTR void tachoSignal() {
+    // TODO
+    Serial.println("INTERRUPT!!!");
+}
+
 void setup() {
     EEPROM.begin(EEPROM_SIZE);
     targetTemp = EEPROM.read(0);
+    
+    pinMode(fanTachoPin, INPUT_PULLUP);
+    attachInterrupt(digitalPinToInterrupt(fanTachoPin), tachoSignal, RISING);
 
     Serial.begin(115200);
 
     Serial.println("Booting");
     WiFi.mode(WIFI_STA);
     WiFi.begin(ssid, password);
-    while (WiFi.waitForConnectResult() != WL_CONNECTED) {
-        Serial.println("Connection Failed! Rebooting...");
-        delay(5000);
-        ESP.restart();
-    }
+
+    // dont wait and block here, run the PID controller even without working WiFi
+    // while (WiFi.waitForConnectResult() != WL_CONNECTED) {
+    //     Serial.println("Connection Failed! Rebooting...");
+    //     delay(5000);
+    //     ESP.restart();
+    // }
+    // Serial.println("Ready");
+    // Serial.print("IP address: ");
+    // Serial.println(WiFi.localIP());
+
     setupOTA();
-    Serial.println("Ready");
-    Serial.print("IP address: ");
-    Serial.println(WiFi.localIP());
 
     sensors.begin();
+    if(sensors.getDeviceCount() == 0) {
+        Serial.println("No temperature sensor found! Rebooting...");
+        ESP.restart();
+    }
 
     // prepare the display
     display.init();
@@ -295,29 +337,41 @@ void setup() {
     display.drawString(0, 0, "Let's make tempeh!");
     display.display();
 
-#ifdef ESP32
-    ledcSetup(ledChannel, freq, resolution);
-    ledcAttachPin(heaterPin, ledChannel);
-#else
-    pinMode(heaterPin, OUTPUT);
-#endif
+    #ifdef ESP32
+        ledcSetup(ledChannel, freq, resolution);
+        ledcAttachPin(heaterPin, ledChannel);
+    #else
+        pinMode(heaterPin, OUTPUT);
+    #endif
     
     heaterPID.setBangBang(5); // run the heater full bang until 5°c below targetTemperature
-    heaterPID.setTimeStep(1000); // run pid calculation every n seconds
-
-    Serial.print("Found ");
-    Serial.print(sensors.getDeviceCount(), DEC);
-    Serial.println(" devices.");
+    heaterPID.setTimeStep(500); // run pid calculation every n seconds
 
     mqttClient.setServer(mqttServer, mqttPort);
     mqttClient.setCallback(mqttCallback);
 
+    for(uint8_t i = 0; i < tickerCount; i++) {
+        tickers[i].start();
+    }
 }
 
-void measureTemperature() {
+void publishTemp() {
+    publish((char *)"incubator/temp", currentTemp);
+}
+
+void publishHeater() {
+    publish((char *)"incubator/heater", heaterPercent);
+}
+
+void reportStatus() {
+    publishTemp();
+    publishHeater();
+}
+
+void measureTemp() {
     sensors.requestTemperaturesByIndex(0);
     measuredTemp = sensors.getTempCByIndex(0);
-    if(measuredTemp >= 50) {
+    if(measuredTemp >= shutdownTemperature) {
         ESP.restart();
     }
 
@@ -342,67 +396,82 @@ void measureTemperature() {
     if(currentTemp != lastTemp) {
         Serial.println(currentTemp);
 
-		publish((char *)"incubator/temp", currentTemp);
+		publishTemp();
         lastTemp = currentTemp;
     }
 }
 
-void checkFan() {
+void drawGraph() {
+    memcpy(tempHistory, &tempHistory[1], sizeof(tempHistory) - sizeof(int));
+    tempHistory[tempHistorySize - 1] = currentTemp;
 
+    // clear the draw area
+    display.setColor(BLACK);
+    display.fillRect(graphX, graphY, graphWidth, graphHeight);
+    display.setColor(WHITE);
+    display.drawRect(graphX, graphY, graphWidth, graphHeight);
+
+    // publish((char *)"incubator/status", (int) historyValue);
+
+    // draw history graph
+    for(uint8_t i = 0; i < tempHistorySize; i++) {
+        uint8_t temp = tempHistory[i];
+
+        uint8_t displayTemp = temp;
+
+        if(displayTemp > displayUpperTemp) {
+            displayTemp = displayUpperTemp;
+        } else if(displayTemp < displayLowerTemp) {
+            displayTemp = displayLowerTemp;
+        }
+        uint8_t y = (displayTemp - displayLowerTemp) * (graphHeight - 2) / (displayUpperTemp - displayLowerTemp);
+
+        // uint8_t y = graphHeight;
+        display.setPixel(
+            graphX + 1 + i,
+            graphY + graphHeight - 1 - y
+        );
+    }
+    display.display();
+}
+
+void checkFan() {
+}
+
+void flashWifi() {
+    if(wifiIconVisible) {
+        display.setColor(BLACK);
+        display.fillRect(graphWidth - 9, 0, 9, 8);
+    } else if(WiFi.status() == WL_CONNECTED) {
+        display.setColor(WHITE);
+        display.drawXbm(graphWidth - 9, 0, 9, 8, wifiIconBits);
+    }
+    display.display();
+    wifiIconVisible = !wifiIconVisible;
 }
 
 void loop() {
     ArduinoOTA.handle();
-
-    if (!mqttClient.connected()) {
-        reconnect();
-    }
     mqttClient.loop();
-
-    unsigned long currentMillis = millis();
-    
-    if(currentMillis - previousMillisTemp > tempInterval) {
-        previousMillisTemp = currentMillis;
-        measureTemperature();
-    }
-
-    if(currentMillis - previousMillisFanCheck > fanCheckInterval) {
-        previousMillisFanCheck= currentMillis;
-        checkFan();
-    }
-
-    if(currentMillis - previousMillisHistory > historyInterval) {
-        previousMillisHistory = currentMillis;
-        memcpy(tempHistory, &tempHistory[1], sizeof(tempHistory) - sizeof(int));
-        int lowpass = 15;
-        tempHistory[tempHistorySize - 1] = (currentTemp - lowpass) * graphHeight / (targetTemp - lowpass);
-
-        // clear the draw area
-        display.setColor(BLACK);
-        display.fillRect(0, graphHeight, display.getWidth(), display.getHeight() - graphHeight);
-        display.setColor(WHITE);
-        display.drawRect(0, graphHeight, display.getWidth(),  display.getHeight() - graphHeight);
-
-        // draw history graph
-        for(uint8_t i = 0; i < tempHistorySize; i++) {
-            int y = tempHistory[i];
-            display.setPixel(i + 1, 18 + (64 - y));
-        }
-        display.display();
-    }
-
     heaterPID.run();
+    for(uint8_t i = 0; i < tickerCount; i++) {
+        tickers[i].update();
+    }
 
     if(heaterVal != lastHeaterVal) {
 		lastHeaterVal = heaterVal;
-        heaterPercent = heaterVal * 100 / OUTPUT_MAX;
-
-		publish((char *)"incubator/heater", heaterPercent);
 
         #ifdef ESP32
             ledcWrite(ledChannel, heaterVal);
         #else
 		    analogWrite(heaterPin, heaterVal);
         #endif
+
+        heaterPercent = heaterVal * 100 / OUTPUT_MAX;
+    
+        if(heaterPercent != lastHeaterPercent) {
+            lastHeaterPercent = heaterPercent;
+    		publishHeater();
+        }
     }
 }
