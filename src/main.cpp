@@ -16,11 +16,20 @@
     #include <WiFi.h>
 #else
     #include <ESP8266WiFi.h>
-#endif
+#endif  
 
 #include <MovingAverageFloat.h>
 
 #define EEPROM_SIZE 4  // holds only targetTemp atm
+
+const uint8_t oledSDSPin = 0;
+const uint8_t oledSCLPin = 2;
+const uint8_t heaterPin = 5;
+const uint8_t tempSensorPin= 4;
+
+const uint8_t fanTachoPin= 15;
+const uint8_t servoPin= 10;
+
 
 const char* clientId = "incubator";
 const char* mqttServer = "192.168.178.113";
@@ -40,13 +49,6 @@ const char* topicOn = "incubator/on";
 
 WiFiClient espClient;
 PubSubClient mqttClient(espClient);
-
-const uint8_t oledSDA = 0;
-const uint8_t oledSCL = 2;
-
-const uint8_t heaterPin = 5;
-const uint8_t tempSensorPin= 4;
-const uint8_t fanTachoPin= 15;
 
 long counter = 0;
 
@@ -103,14 +105,13 @@ Ticker tickers[] = {
     Ticker(mqttReconnect, 60 * 1000),
     Ticker(measureTemp, 1 * 1000),
     Ticker(checkFan, 4 * 1000),
-    // Ticker timerDrawGraph(drawGraph, 1 * 1000);
     Ticker(drawGraph, 1 * 5000),
     Ticker(reportStatus, 10 * 1000),
     Ticker(flashWifi, 1000)
 };
 
 AutoPID heaterPID(&currentTemp, &targetTemp, &heaterVal, OUTPUT_MIN, OUTPUT_MAX, kp, ki, kd);
-SSD1306Wire display(0x3c, oledSDA, oledSCL);
+SSD1306Wire display(0x3c, oledSDSPin, oledSCLPin);
 
 const uint8_t displayWidth = 128;
 const uint8_t displayHeight = 64;
@@ -350,6 +351,7 @@ void setup() {
     mqttClient.setServer(mqttServer, mqttPort);
     mqttClient.setCallback(mqttCallback);
 
+    // start all tickers
     for(uint8_t i = 0; i < tickerCount; i++) {
         tickers[i].start();
     }
@@ -411,8 +413,6 @@ void drawGraph() {
     display.setColor(WHITE);
     display.drawRect(graphX, graphY, graphWidth, graphHeight);
 
-    // publish((char *)"incubator/status", (int) historyValue);
-
     // draw history graph
     for(uint8_t i = 0; i < tempHistorySize; i++) {
         uint8_t temp = tempHistory[i];
@@ -438,6 +438,7 @@ void drawGraph() {
 void checkFan() {
 }
 
+// flash wifi icon while connected
 void flashWifi() {
     if(wifiIconVisible) {
         display.setColor(BLACK);
@@ -454,6 +455,8 @@ void loop() {
     ArduinoOTA.handle();
     mqttClient.loop();
     heaterPID.run();
+    
+    // checkk all tickers 
     for(uint8_t i = 0; i < tickerCount; i++) {
         tickers[i].update();
     }
