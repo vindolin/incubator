@@ -1,8 +1,16 @@
 #include <Arduino.h>
+
+#ifdef ESP32
+    #include <WiFi.h>
+    #include <ESPmDNS.h>
+#else
+    #include <ESP8266WiFi.h>
+    #include <ESP8266mDNS.h>
+#endif  
+
 #include <DallasTemperature.h>
 #include <PubSubClient.h>
 #include <AutoPID.h>
-#include <ESP8266mDNS.h>
 #include <WiFiUdp.h>
 #include <ArduinoOTA.h>
 #include <EEPROM.h>
@@ -12,15 +20,14 @@
 #include <config.h>
 #include <font.h>  // Dialog_plain_13
 
-#ifdef ESP32
-    #include <WiFi.h>
-#else
-    #include <ESP8266WiFi.h>
-#endif  
-
 #include <MovingAverageFloat.h>
 
 #define EEPROM_SIZE 4  // holds only targetTemp atm
+
+#ifdef ESP32
+    // move pin assignments into here
+#else
+#endif  
 
 const uint8_t oledSDSPin = 0;
 const uint8_t oledSCLPin = 2;
@@ -69,6 +76,7 @@ double currentTemp = 0;
 double lastTemp = 0;
 uint8_t lastHeaterPercent = 0;
 uint8_t heaterPercent = 0;
+uint8_t welcomeCleared = false;
 
 const int oneWireBus = tempSensorPin;
 OneWire oneWire(oneWireBus);
@@ -113,12 +121,14 @@ Ticker tickers[] = {
 AutoPID heaterPID(&currentTemp, &targetTemp, &heaterVal, OUTPUT_MIN, OUTPUT_MAX, kp, ki, kd);
 SSD1306Wire display(0x3c, oledSDSPin, oledSCLPin);
 
+// I'm using an OLED display with two color regions, 
 const uint8_t displayWidth = 128;
 const uint8_t displayHeight = 64;
+const uint8_t displayUpperHeight = 16;
 const uint8_t graphWidth = 128;
-const uint8_t graphHeight = 46;
+const uint8_t graphHeight = displayHeight - displayUpperHeight;
 const uint8_t graphX = 0;
-const uint8_t graphY = 18;
+const uint8_t graphY = displayUpperHeight;
 
 uint8_t displayLowerTemp = 15;
 uint8_t displayUpperTemp = 40;
@@ -129,40 +139,40 @@ void publish(String topic) {
 }
 
 void publish(char* topic, double value, bool retained=true) {
-	Serial.print("publish: ");
-	Serial.println(value);
+    Serial.print("publish: ");
+    Serial.println(value);
 
-	String tempStr = String(value);
+    String tempStr = String(value);
 
-	char buffer[50];
-	tempStr.toCharArray(buffer, tempStr.length() + 1);
+    char buffer[50];
+    tempStr.toCharArray(buffer, tempStr.length() + 1);
 
-	mqttClient.publish(topic, buffer, retained);
-	mqttClient.loop();
+    mqttClient.publish(topic, buffer, retained);
+    mqttClient.loop();
 }
 
 void publish(char* topic, int value, bool retained=true) {
-	Serial.print("publish: ");
-	Serial.println(value);
+    Serial.print("publish: ");
+    Serial.println(value);
 
-	String tempStr = String(value);
-	char buffer[50];
-	tempStr.toCharArray(buffer, tempStr.length() + 1);
+    String tempStr = String(value);
+    char buffer[50];
+    tempStr.toCharArray(buffer, tempStr.length() + 1);
 
-	mqttClient.publish(topic, buffer, retained);
-	mqttClient.loop();
+    mqttClient.publish(topic, buffer, retained);
+    mqttClient.loop();
 }
 
 void publish(char* topic, char* value, bool retained=true) {
-	Serial.print("publish: ");
-	Serial.println(value);
+    Serial.print("publish: ");
+    Serial.println(value);
 
-	String tempStr = String(value);
-	char buffer[50];
-	tempStr.toCharArray(buffer, tempStr.length() + 1);
+    String tempStr = String(value);
+    char buffer[50];
+    tempStr.toCharArray(buffer, tempStr.length() + 1);
 
-	mqttClient.publish(topic, buffer, retained);
-	mqttClient.loop();
+    mqttClient.publish(topic, buffer, retained);
+    mqttClient.loop();
 }
 
 void setOnState(bool state) {
@@ -184,8 +194,8 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
     // publish((char*)"incubator/_echo/rcv", (char*)payload);
     // mqttClient.loop();
 
-	if(strcmp(topic, topicTargetTemp) == 0) {
-	    targetTemp = atof((char*)payload);  
+    if(strcmp(topic, topicTargetTemp) == 0) {
+        targetTemp = atof((char*)payload);  
         if(targetTemp > 50) {
             return;
         } else if(targetTemp < 1) {
@@ -196,44 +206,44 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
 
         EEPROM.write(0, targetTemp);
         EEPROM.commit();
-		publish((char *)"incubator/_echo/target_temp", targetTemp);
-	}
+        publish((char *)"incubator/_echo/target_temp", targetTemp);
+    }
 
-	else if(strcmp(topic, topicOn) == 0) {
-	    bool state = atoi((char*)payload) > 0;
+    else if(strcmp(topic, topicOn) == 0) {
+        bool state = atoi((char*)payload) > 0;
         setOnState(state);
-		publish((char *)"incubator/_echo/on", onState);
-	}
+        publish((char *)"incubator/_echo/on", onState);
+    }
 
-	else if(strcmp(topic, topicKP) == 0) {
-	    kp = atof((char*)payload);
-		heaterPID.setGains(kp, ki, kd);
-		publish((char *)"incubator/_echo/kp", kp);
-	}
+    else if(strcmp(topic, topicKP) == 0) {
+        kp = atof((char*)payload);
+        heaterPID.setGains(kp, ki, kd);
+        publish((char *)"incubator/_echo/kp", kp);
+    }
 
-	else if(strcmp(topic, topicKD) == 0) {
-	    kd = atof((char*)payload);
-		heaterPID.setGains(kp, ki, kd);
-		publish((char *)"incubator/_echo/kd", kd);
-	}
+    else if(strcmp(topic, topicKD) == 0) {
+        kd = atof((char*)payload);
+        heaterPID.setGains(kp, ki, kd);
+        publish((char *)"incubator/_echo/kd", kd);
+    }
 
-	else if(strcmp(topic, topicKI) == 0) {
-	    ki = atof((char*)payload);
-		heaterPID.setGains(kp, ki, kd);
-		publish((char *)"incubator/_echo/ki", ki);
-	}
+    else if(strcmp(topic, topicKI) == 0) {
+        ki = atof((char*)payload);
+        heaterPID.setGains(kp, ki, kd);
+        publish((char *)"incubator/_echo/ki", ki);
+    }
 
-	else if(strcmp(topic, topicReset) == 0) {
-		publish((char *)"incubator/_echo/reset", (char*) "reset");
-	    ESP.restart();
-	}
+    else if(strcmp(topic, topicReset) == 0) {
+        publish((char *)"incubator/_echo/reset", (char*) "reset");
+        ESP.restart();
+    }
 
-	// else if(strcmp(topic, topicCommand) == 0) {
-	// 	publish((char *)"incubator/_echo/cmd", (char*)payload);
-	// 	if(strcmp((char*)payload, "reset") == 0) {
-	//     	ESP.restart();
+    // else if(strcmp(topic, topicCommand) == 0) {
+    // 	publish((char *)"incubator/_echo/cmd", (char*)payload);
+    // 	if(strcmp((char*)payload, "reset") == 0) {
+    //     	ESP.restart();
     //     }
-	// }
+    // }
     // mqttClient.loop();
 }
 
@@ -334,6 +344,7 @@ void setup() {
     display.clear();
     display.flipScreenVertically();
     display.setTextAlignment(TEXT_ALIGN_LEFT);
+    display.setColor(WHITE);
     display.setFont(Dialog_plain_13);
     display.drawString(0, 0, "Let's make tempeh!");
     display.display();
@@ -379,13 +390,19 @@ void measureTemp() {
 
     Serial.println(measuredTemp);
 
-	if(measuredTemp > 0) {
-		currentTemp = measuredTemp;
-		filter.add(currentTemp);
-		currentTemp = filter.get();
+    if(measuredTemp > 0) {
+        if(!welcomeCleared) {
+            display.clear();
+            display.display();
+            welcomeCleared = true;
+        }
+
+        currentTemp = measuredTemp;
+        filter.add(currentTemp);
+        currentTemp = filter.get();
         
         display.setColor(BLACK);
-        display.fillRect(0, 0, display.getWidth(), 16);
+        display.fillRect(0, 0, display.getWidth() - 9, 16);
         display.setColor(WHITE);
 
         char tempStr[7];
@@ -393,12 +410,12 @@ void measureTemp() {
         display.drawString(0, 0, tempStr);
 
         display.display();
-	}
+    }
 
     if(currentTemp != lastTemp) {
         Serial.println(currentTemp);
 
-		publishTemp();
+        publishTemp();
         lastTemp = currentTemp;
     }
 }
@@ -440,12 +457,19 @@ void checkFan() {
 
 // flash wifi icon while connected
 void flashWifi() {
-    if(wifiIconVisible) {
+    if(WiFi.status() == WL_CONNECTED) {
         display.setColor(BLACK);
         display.fillRect(graphWidth - 9, 0, 9, 8);
-    } else if(WiFi.status() == WL_CONNECTED) {
         display.setColor(WHITE);
         display.drawXbm(graphWidth - 9, 0, 9, 8, wifiIconBits);
+    } else {
+        if(wifiIconVisible) {
+            display.setColor(WHITE);
+            display.drawXbm(graphWidth - 9, 0, 9, 8, wifiIconBits);
+        } else {
+            display.setColor(BLACK);
+            display.fillRect(graphWidth - 9, 0, 9, 8);
+        }
     }
     display.display();
     wifiIconVisible = !wifiIconVisible;
@@ -462,19 +486,19 @@ void loop() {
     }
 
     if(heaterVal != lastHeaterVal) {
-		lastHeaterVal = heaterVal;
+        lastHeaterVal = heaterVal;
 
         #ifdef ESP32
             ledcWrite(ledChannel, heaterVal);
         #else
-		    analogWrite(heaterPin, heaterVal);
+            analogWrite(heaterPin, heaterVal);
         #endif
 
         heaterPercent = heaterVal * 100 / OUTPUT_MAX;
     
         if(heaterPercent != lastHeaterPercent) {
             lastHeaterPercent = heaterPercent;
-    		publishHeater();
+            publishHeater();
         }
     }
 }
