@@ -25,18 +25,26 @@
 #define EEPROM_SIZE 4  // holds only targetTemp atm
 
 #ifdef ESP32
-    // move pin assignments into here
+    const uint8_t buildinLED = 2;
+    const uint8_t oledSDSPin = 4;
+    const uint8_t oledSCLPin = 15;
+    const uint8_t heaterPin = 22;
+    const uint8_t tempSensorPin = 26;
+
+    const uint8_t fanTachoPin = 10;
+    const uint8_t servoPin= 19;
 #else
+    const uint8_t buildinLED = 2;
+    const uint8_t oledSDSPin = 13;
+    const uint8_t oledSCLPin = 0;
+    const uint8_t heaterPin = 5;
+    const uint8_t tempSensorPin = 4;
+
+    const uint8_t fanTachoPin = 15;
+    const uint8_t servoPin = 10;
 #endif  
 
-const uint8_t oledSDSPin = 0;
-const uint8_t oledSCLPin = 2;
-const uint8_t heaterPin = 5;
-const uint8_t tempSensorPin= 4;
-
-const uint8_t fanTachoPin= 15;
-const uint8_t servoPin= 10;
-
+#define SECONDS 1000
 
 const char* clientId = "incubator";
 const char* mqttServer = "192.168.178.113";
@@ -49,15 +57,13 @@ const char* topicKP = "incubator/kp";
 const char* topicKD = "incubator/kd";
 const char* topicKI = "incubator/ki";
 const char* topicOn = "incubator/on";
-
+const uint8_t tempResolution = 12;
 // const IPAddress ip(192, 168, 178, 97);
 // const IPAddress fritzbox(192, 168, 178, 1);
 // const IPAddress subnet(255, 255, 255, 0);
 
 WiFiClient espClient;
 PubSubClient mqttClient(espClient);
-
-long counter = 0;
 
 #ifdef ESP32
     const int ledChannel = 0;
@@ -78,8 +84,7 @@ uint8_t lastHeaterPercent = 0;
 uint8_t heaterPercent = 0;
 uint8_t welcomeCleared = false;
 
-const int oneWireBus = tempSensorPin;
-OneWire oneWire(oneWireBus);
+OneWire oneWire(tempSensorPin);
 DallasTemperature sensors(&oneWire);
 
 MovingAverageFloat <8> filter;
@@ -107,21 +112,27 @@ void checkFan();
 void drawGraph();
 void reportStatus();
 void flashWifi();
+void checkWifi();
 
-uint8_t tickerCount = 6;
+const uint16_t measureTempInterval = 1000;
+Ticker tempTicker = Ticker(measureTemp, measureTempInterval);
+Ticker mqttReconnectTicker = Ticker(mqttReconnect, 10 * SECONDS);
+
+uint8_t tickerCount = 7;
 Ticker tickers[] = {
-    Ticker(mqttReconnect, 60 * 1000),
-    Ticker(measureTemp, 1 * 1000),
-    Ticker(checkFan, 4 * 1000),
-    Ticker(drawGraph, 1 * 5000),
-    Ticker(reportStatus, 10 * 1000),
-    Ticker(flashWifi, 1000)
+    tempTicker,
+    mqttReconnectTicker,
+    Ticker(checkFan, 4 * SECONDS),
+    Ticker(drawGraph, 5 * SECONDS),
+    Ticker(reportStatus, 10 * SECONDS),
+    Ticker(checkWifi, 5 * SECONDS),
+    Ticker(flashWifi, 1 * SECONDS)
 };
 
 AutoPID heaterPID(&currentTemp, &targetTemp, &heaterVal, OUTPUT_MIN, OUTPUT_MAX, kp, ki, kd);
 SSD1306Wire display(0x3c, oledSDSPin, oledSCLPin);
 
-// I'm using an OLED display with two color regions, 
+// I'm using an OLED display with two color regions,
 const uint8_t displayWidth = 128;
 const uint8_t displayHeight = 64;
 const uint8_t displayUpperHeight = 16;
@@ -133,45 +144,22 @@ const uint8_t graphY = displayUpperHeight;
 uint8_t displayLowerTemp = 15;
 uint8_t displayUpperTemp = 40;
 const uint8_t tempHistorySize = graphWidth - 2; // without 2 pixels for the frame
+
 int tempHistory[tempHistorySize];
+char tmpBuffer[32];
+long counter = 0;
+int reconnectCount = 0;
+bool measureTempMode = true;
 
-void publish(String topic) {
-}
-
-void publish(char* topic, double value, bool retained=true) {
+template <class T>
+void publish(char* topic, T value, bool retained=true) {
     Serial.print("publish: ");
     Serial.println(value);
 
     String tempStr = String(value);
+    tempStr.toCharArray(tmpBuffer, tempStr.length() + 1);
 
-    char buffer[50];
-    tempStr.toCharArray(buffer, tempStr.length() + 1);
-
-    mqttClient.publish(topic, buffer, retained);
-    mqttClient.loop();
-}
-
-void publish(char* topic, int value, bool retained=true) {
-    Serial.print("publish: ");
-    Serial.println(value);
-
-    String tempStr = String(value);
-    char buffer[50];
-    tempStr.toCharArray(buffer, tempStr.length() + 1);
-
-    mqttClient.publish(topic, buffer, retained);
-    mqttClient.loop();
-}
-
-void publish(char* topic, char* value, bool retained=true) {
-    Serial.print("publish: ");
-    Serial.println(value);
-
-    String tempStr = String(value);
-    char buffer[50];
-    tempStr.toCharArray(buffer, tempStr.length() + 1);
-
-    mqttClient.publish(topic, buffer, retained);
+    mqttClient.publish(topic, tmpBuffer, retained);
     mqttClient.loop();
 }
 
@@ -252,6 +240,7 @@ void mqttReconnect() {
 
     Serial.print("Attempting MQTT connection...");
     if (mqttClient.connect(clientId)) {
+        mqttReconnectTicker.interval(60 * SECONDS);
         Serial.println("connected");
     } else {
         Serial.print("failed, rc=");
@@ -308,12 +297,37 @@ ICACHE_RAM_ATTR void tachoSignal() {
     Serial.println("INTERRUPT!!!");
 }
 
+void initOled() {
+    pinMode(16,OUTPUT);
+    digitalWrite(16, LOW); 
+    delay(50); 
+    digitalWrite(16, HIGH); // while OLED is running, must set GPIO16 in high、    
+}
+
 void setup() {
+    pinMode(buildinLED, OUTPUT);
+
+    DeviceAddress tempDeviceAddress;
+
+    sensors.begin();
+    sensors.getAddress(tempDeviceAddress, 0);
+    sensors.setResolution(tempDeviceAddress, 12);
+
+    sensors.setWaitForConversion(false);
+    if(sensors.getDeviceCount() == 0) {
+        Serial.println("No temperature sensor found! Rebooting...");
+        // delay(5000);
+        // ESP.restart();
+    }
+
+    // scan();
+    // initOled();  // only needed for my special ESP32/OLED Board
+
     EEPROM.begin(EEPROM_SIZE);
     targetTemp = EEPROM.read(0);
-    
-    pinMode(fanTachoPin, INPUT_PULLUP);
-    attachInterrupt(digitalPinToInterrupt(fanTachoPin), tachoSignal, RISING);
+
+    // pinMode(fanTachoPin, INPUT_PULLUP);
+    // attachInterrupt(digitalPinToInterrupt(fanTachoPin), tachoSignal, RISING);
 
     Serial.begin(115200);
 
@@ -321,6 +335,8 @@ void setup() {
     WiFi.mode(WIFI_STA);
     WiFi.begin(ssid, password);
 
+    delay(1000);
+    mqttReconnect();
     // dont wait and block here, run the PID controller even without working WiFi
     // while (WiFi.waitForConnectResult() != WL_CONNECTED) {
     //     Serial.println("Connection Failed! Rebooting...");
@@ -332,12 +348,6 @@ void setup() {
     // Serial.println(WiFi.localIP());
 
     setupOTA();
-
-    sensors.begin();
-    if(sensors.getDeviceCount() == 0) {
-        Serial.println("No temperature sensor found! Rebooting...");
-        ESP.restart();
-    }
 
     // prepare the display
     display.init();
@@ -377,58 +387,69 @@ void publishHeater() {
 }
 
 void reportStatus() {
+    // return;
     publishTemp();
     publishHeater();
+    publish((char *)"incubator/rssi", WiFi.RSSI());
 }
 
 void measureTemp() {
-    sensors.requestTemperaturesByIndex(0);
-    measuredTemp = sensors.getTempCByIndex(0);
-    if(measuredTemp >= shutdownTemperature) {
-        ESP.restart();
-    }
+    // start a new measurement and in the next run get the result
+    if(measureTempMode) {
+        tempTicker.interval(measureTempInterval);
+        sensors.requestTemperaturesByIndex(0);
+        measureTempMode = false;
 
-    Serial.println(measuredTemp);
-
-    if(measuredTemp > 0) {
-        if(!welcomeCleared) {
-            display.clear();
-            display.display();
-            welcomeCleared = true;
+    // read the result
+    } else {
+        tempTicker.interval(0);
+        measuredTemp = sensors.getTempCByIndex(0);
+        if(measuredTemp >= shutdownTemperature) {
+            Serial.println(measuredTemp);
+            Serial.println("too hot! rebooting!");
+            ESP.restart();
         }
 
-        currentTemp = measuredTemp;
-        filter.add(currentTemp);
-        currentTemp = filter.get();
-        
-        display.setColor(BLACK);
-        display.fillRect(0, 0, display.getWidth() - 9, 16);
-        display.setColor(WHITE);
+        Serial.print("temp: ");
+        Serial.println(measuredTemp);
 
-        char tempStr[7];
-        sprintf(tempStr, "%2.2f°/%d°@%d%%", currentTemp, int(targetTemp), heaterPercent);
-        display.drawString(0, 0, tempStr);
+        if(measuredTemp > 0) {
+            if(!welcomeCleared) {
+                display.clear();
+                display.setColor(WHITE);
+                display.drawRect(graphX, graphY, graphWidth, graphHeight);
+                display.display();
+                welcomeCleared = true;
+            }
 
-        display.display();
-    }
+            currentTemp = measuredTemp;
+            filter.add(currentTemp);
+            currentTemp = filter.get();
 
-    if(currentTemp != lastTemp) {
-        Serial.println(currentTemp);
+            display.setColor(BLACK);
+            display.fillRect(0, 0, display.getWidth() - 9, 16);
+            display.setColor(WHITE);
 
-        publishTemp();
-        lastTemp = currentTemp;
+            sprintf(tmpBuffer, "%2.2f°/%d°@%d%%", currentTemp, int(targetTemp), heaterPercent);
+            display.drawString(0, 0, tmpBuffer);
+            display.display();
+        }
+
+        if(currentTemp != lastTemp) {
+            publishTemp();
+            lastTemp = currentTemp;
+        }
+        measureTempMode = true;
     }
 }
-
 void drawGraph() {
     memcpy(tempHistory, &tempHistory[1], sizeof(tempHistory) - sizeof(int));
     tempHistory[tempHistorySize - 1] = currentTemp;
 
     // clear the draw area
     display.setColor(BLACK);
-    display.fillRect(graphX, graphY, graphWidth, graphHeight);
+    display.fillRect(graphX + 1, graphY + 1, graphWidth - 2, graphHeight - 2);
     display.setColor(WHITE);
-    display.drawRect(graphX, graphY, graphWidth, graphHeight);
 
     // draw history graph
     for(uint8_t i = 0; i < tempHistorySize; i++) {
@@ -457,6 +478,7 @@ void checkFan() {
 
 // flash wifi icon while connected
 void flashWifi() {
+    if(! welcomeCleared) return;
     if(WiFi.status() == WL_CONNECTED) {
         display.setColor(BLACK);
         display.fillRect(graphWidth - 9, 0, 9, 8);
@@ -475,12 +497,26 @@ void flashWifi() {
     wifiIconVisible = !wifiIconVisible;
 }
 
+void checkWifi() {
+    if (WiFi.status() != WL_CONNECTED) {
+        reconnectCount++;
+        digitalWrite(buildinLED, LOW);
+        Serial.print("trying to reconnect (");
+        Serial.print(reconnectCount);
+        Serial.println(")");
+        WiFi.begin();
+    } else {
+        reconnectCount = 0;
+        digitalWrite(buildinLED, HIGH);
+    }
+}
+
 void loop() {
     ArduinoOTA.handle();
     mqttClient.loop();
     heaterPID.run();
-    
-    // checkk all tickers 
+
+    // checkk all tickers
     for(uint8_t i = 0; i < tickerCount; i++) {
         tickers[i].update();
     }
