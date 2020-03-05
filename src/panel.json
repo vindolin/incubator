@@ -1,0 +1,261 @@
+{
+  "datasource": null,
+  "alert": {
+    "alertRuleTags": {},
+    "conditions": [
+      {
+        "evaluator": {
+          "params": [
+            35
+          ],
+          "type": "gt"
+        },
+        "operator": {
+          "type": "and"
+        },
+        "query": {
+          "params": [
+            "A",
+            "5m",
+            "now"
+          ]
+        },
+        "reducer": {
+          "params": [],
+          "type": "avg"
+        },
+        "type": "query"
+      },
+      {
+        "evaluator": {
+          "params": [
+            33
+          ],
+          "type": "lt"
+        },
+        "operator": {
+          "type": "and"
+        },
+        "query": {
+          "params": [
+            "A",
+            "5m",
+            "now"
+          ]
+        },
+        "reducer": {
+          "params": [],
+          "type": "avg"
+        },
+        "type": "query"
+      }
+    ],
+    "executionErrorState": "alerting",
+    "for": "5m",
+    "frequency": "1m",
+    "handler": 1,
+    "message": "Incubator Alert!",
+    "name": "Incubator Temperatur alert",
+    "noDataState": "no_data",
+    "notifications": [
+      {
+        "uid": "V56lxRmgz"
+      }
+    ]
+  },
+  "aliasColors": {
+    "Temperatur": "dark-orange"
+  },
+  "bars": false,
+  "dashLength": 10,
+  "dashes": false,
+  "decimals": 2,
+  "fill": 1,
+  "fillGradient": 0,
+  "gridPos": {
+    "h": 9,
+    "w": 11,
+    "x": 0,
+    "y": 15
+  },
+  "hiddenSeries": false,
+  "id": 3,
+  "interval": "",
+  "legend": {
+    "alignAsTable": false,
+    "avg": false,
+    "current": true,
+    "hideEmpty": false,
+    "hideZero": false,
+    "max": false,
+    "min": false,
+    "rightSide": false,
+    "show": true,
+    "total": false,
+    "values": true
+  },
+  "lines": true,
+  "linewidth": 1,
+  "nullPointMode": "null",
+  "options": {
+    "dataLinks": []
+  },
+  "percentage": false,
+  "pointradius": 2,
+  "points": false,
+  "renderer": "flot",
+  "seriesOverrides": [
+    {
+      "alias": "Temperature",
+      "yaxis": 1
+    },
+    {
+      "alias": "Heater duty cycle",
+      "yaxis": 2
+    }
+  ],
+  "spaceLength": 10,
+  "stack": false,
+  "steppedLine": false,
+  "targets": [
+    {
+      "alias": "Temperature",
+      "groupBy": [
+        {
+          "params": [
+            "$__interval"
+          ],
+          "type": "time"
+        },
+        {
+          "params": [
+            "none"
+          ],
+          "type": "fill"
+        }
+      ],
+      "measurement": "incubator_float",
+      "orderByTime": "ASC",
+      "policy": "default",
+      "query": "SELECT mean(\"value\") FROM \"incubator_float\" WHERE (\"topic\" = 'incubator/temp') AND $timeFilter GROUP BY time($__interval) fill(previous)",
+      "rawQuery": false,
+      "refId": "A",
+      "resultFormat": "time_series",
+      "select": [
+        [
+          {
+            "params": [
+              "value"
+            ],
+            "type": "field"
+          },
+          {
+            "params": [],
+            "type": "mean"
+          }
+        ]
+      ],
+      "tags": [
+        {
+          "key": "topic",
+          "operator": "=",
+          "value": "incubator/temp"
+        }
+      ]
+    },
+    {
+      "alias": "Heater duty cycle",
+      "groupBy": [
+        {
+          "params": [
+            "$__interval"
+          ],
+          "type": "time"
+        },
+        {
+          "params": [
+            "previous"
+          ],
+          "type": "fill"
+        }
+      ],
+      "hide": false,
+      "measurement": "incubator_int",
+      "orderByTime": "ASC",
+      "policy": "default",
+      "refId": "B",
+      "resultFormat": "time_series",
+      "select": [
+        [
+          {
+            "params": [
+              "value"
+            ],
+            "type": "field"
+          },
+          {
+            "params": [],
+            "type": "mean"
+          }
+        ]
+      ],
+      "tags": [
+        {
+          "key": "topic",
+          "operator": "=",
+          "value": "incubator/heater"
+        }
+      ]
+    }
+  ],
+  "thresholds": [
+    {
+      "colorMode": "critical",
+      "fill": true,
+      "line": true,
+      "op": "gt",
+      "value": 35
+    }
+  ],
+  "timeFrom": null,
+  "timeRegions": [],
+  "timeShift": null,
+  "title": "Incubator Temperatur",
+  "tooltip": {
+    "shared": true,
+    "sort": 0,
+    "value_type": "individual"
+  },
+  "type": "graph",
+  "xaxis": {
+    "buckets": null,
+    "mode": "time",
+    "name": null,
+    "show": true,
+    "values": []
+  },
+  "yaxes": [
+    {
+      "decimals": null,
+      "format": "celsius",
+      "label": "",
+      "logBase": 1,
+      "max": "40",
+      "min": "15",
+      "show": true
+    },
+    {
+      "decimals": null,
+      "format": "percent",
+      "label": null,
+      "logBase": 1,
+      "max": "100",
+      "min": "0",
+      "show": true
+    }
+  ],
+  "yaxis": {
+    "align": false,
+    "alignLevel": null
+  }
+}
