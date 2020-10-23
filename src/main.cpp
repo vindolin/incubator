@@ -1,24 +1,11 @@
-#include <Arduino.h>
-
-#ifdef ESP32
-    #include <WiFi.h>
-    #include <ESPmDNS.h>
-#else
-    #include <ESP8266WiFi.h>
-    #include <ESP8266mDNS.h>
-#endif
+#include <IotBase.h>
 
 #include <DallasTemperature.h>
-#include <PubSubClient.h>
 #include <AutoPID.h>
-#include <WiFiUdp.h>
-#include <ArduinoOTA.h>
 #include <EEPROM.h>
 #include <SSD1306Wire.h>
-#include <Ticker.h>
 #include <MovingAverageFloat.h>
 
-#include <config.h>
 #include <font.h>  // Dialog_plain_13
 
 #define EEPROM_SIZE 4  // holds only targetTemp atm
@@ -41,11 +28,11 @@
 
     const uint8_t fanTachoPin = 14;
     const uint8_t servoPin = 10;
-#endif  
+#endif
 
 #define SECONDS 1000
 
-const char* clientId = "incubator";
+const char* CLIENT_ID = "incubator";
 
 char topicSubTargetTemp[] = "incubator/target_temp";
 char topicSubCommand[] = "incubator/cmd";
@@ -54,6 +41,17 @@ char topicSubKp[] = "incubator/kp";
 char topicSubKd[] = "incubator/kd";
 char topicSubKi[] = "incubator/ki";
 char topicSubOn[] = "incubator/on";
+
+char* subTopics[] = {
+    topicSubTargetTemp,
+    topicSubCommand,
+    topicSubReset,
+    topicSubKp,
+    topicSubKd,
+    topicSubKi,
+    topicSubOn,
+};
+size_t subTopicCount = sizeof(subTopics) / sizeof(subTopics[0]);
 
 char topicPubEchoOnState[] = "incubator/_echo/on_state";
 char topicPubEchoTargetTemp[] = "incubator/_echo/target_temp";
@@ -68,9 +66,6 @@ char topicPubRpm[] = "incubator/rpm";
 char topicPubHeater[] = "incubator/heater";
 
 const uint8_t tempResolution = 12;
-
-WiFiClient espClient;
-PubSubClient mqttClient(espClient);
 
 const int pwmFreq = 20;
 
@@ -108,7 +103,8 @@ MovingAverageFloat <8> filter;
 bool wifiIconVisible = false;
 static unsigned char wifiIconBits[] = {
    0x7c, 0x00, 0x82, 0x00, 0x39, 0x01, 0x44, 0x00, 0x92, 0x00, 0x38, 0x00,
-   0x38, 0x00, 0x10, 0x00 };
+   0x38, 0x00, 0x10, 0x00
+};
 
 float kp = 850.0;
 float kd = 250.0;
@@ -123,27 +119,22 @@ void drawGraph();
 void reportStatus();
 void updateHeater();
 
-uint32_t checkMqttInterval = 60 * SECONDS;  // after first connect
-
 const uint16_t measureTempInterval = 1000;
 Ticker tickerTemp = Ticker(measureTemp, measureTempInterval);
-Ticker tickerCheckMqtt = Ticker(checkMqtt, 10 * SECONDS);
 
 uint8_t checkFanInterval = 1;
 uint16_t minFanRpm = 2000;
 uint16_t fanRpm = 0;
 
-uint8_t tickerCount = 8;
 Ticker tickers[] = {
-    Ticker(checkWiFi, 5 * SECONDS),
     Ticker(flashWifi, 1 * SECONDS),
-    tickerCheckMqtt,
     tickerTemp,
     Ticker(checkFan, checkFanInterval * SECONDS),
     Ticker(drawGraph, 5 * SECONDS),
     Ticker(reportStatus, 10 * SECONDS),
     Ticker(updateHeater, 1 * SECONDS)
 };
+size_t tickerCount = sizeof(tickers) / sizeof(tickers[0]);
 
 AutoPID heaterPID(&currentTemp, &targetTemp, &heaterVal, OUTPUT_MIN, OUTPUT_MAX, kp, ki, kd);
 SSD1306Wire display(0x3c, oledSDSPin, oledSCLPin);
@@ -164,7 +155,6 @@ const uint8_t tempHistorySize = graphWidth - 2; // without 2 pixels for the fram
 int tempHistory[tempHistorySize];
 char tmpBuffer[32];
 long counter = 0;
-int reconnectCount = 0;
 bool measureTempMode = true;
 bool validMeasurement = false;
 
@@ -172,18 +162,6 @@ volatile uint16_t halfRevolutions = 0;
 
 ICACHE_RAM_ATTR void onTacho() {
     halfRevolutions++;
-}
-
-template <class T>
-void publish(char* topic, T value, bool retained=true) {
-    // Serial.print("publish: ");
-    // Serial.println(value);
-
-    String tempStr = String(value);
-    tempStr.toCharArray(tmpBuffer, tempStr.length() + 1);
-
-    mqttClient.publish(topic, tmpBuffer, retained);
-    mqttClient.loop();
 }
 
 void setOnState(bool state) {
@@ -198,13 +176,14 @@ void setOnState(bool state) {
 }
 
 void mqttCallback(char* topic, byte* payload, unsigned int length) {
+    payload[length] = '\0';
+
     Serial.print("receiving: ");
     Serial.print(topic);
     Serial.print(' ');
     Serial.println((char*)payload);
 
     // publish((char*)"incubator/_echo/rcv", (char*)payload);
-    // mqttClient.loop();
 
     if(strcmp(topic, topicSubTargetTemp) == 0) {
         targetTemp = atof((char*)payload);
@@ -259,43 +238,6 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
     // mqttClient.loop();
 }
 
-void setupOTA() {
-    ArduinoOTA.setHostname("incubator");
-
-    ArduinoOTA.onStart([]() {
-        String type;
-        if (ArduinoOTA.getCommand() == U_FLASH) {
-            type = "sketch";
-        } else { // U_FS
-            type = "filesystem";
-        }
-
-        // NOTE: if updating FS this would be the place to unmount FS using FS.end()
-        Serial.println("Start updating " + type);
-    });
-    ArduinoOTA.onEnd([]() {
-        Serial.println("\nEnd");
-    });
-    ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
-        Serial.printf("Progress: %u%%\r", (progress / (total / 100)));
-    });
-    ArduinoOTA.onError([](ota_error_t error) {
-        Serial.printf("Error[%u]: ", error);
-        if (error == OTA_AUTH_ERROR) {
-            Serial.println("Auth Failed");
-        } else if (error == OTA_BEGIN_ERROR) {
-            Serial.println("Begin Failed");
-        } else if (error == OTA_CONNECT_ERROR) {
-            Serial.println("Connect Failed");
-        } else if (error == OTA_RECEIVE_ERROR) {
-            Serial.println("Receive Failed");
-        } else if (error == OTA_END_ERROR) {
-            Serial.println("End Failed");
-        }
-    });
-    ArduinoOTA.begin();
-}
-
 void publishTemp() {
     Serial.print("temp: ");
     Serial.println(currentTemp);
@@ -309,8 +251,8 @@ void publishHeater() {
 void initOled() {
     pinMode(16,OUTPUT);
     digitalWrite(16, LOW);
-    delay(50); 
-    digitalWrite(16, HIGH); // while OLED is running, must set GPIO16 in high、    
+    delay(50);
+    digitalWrite(16, HIGH); // while OLED is running, must set GPIO16 in high、
 }
 
 void setHeater(int value) {
@@ -350,47 +292,6 @@ void updateHeater() {
     } else {
         setHeater(0);
     }
-}
-
-void checkWiFi() {
-    if (WiFi.status() != WL_CONNECTED) {
-        tickerCheckMqtt.stop();
-        reconnectCount++;
-        digitalWrite(buildinLED, HIGH);
-        Serial.print("WiFi reconnect (");
-        Serial.print(reconnectCount);
-        Serial.println(")");
-        WiFi.begin();
-    } else {
-        tickerCheckMqtt.start();
-        if(reconnectCount > 0) {
-            Serial.print("WiFi connected as ");
-            Serial.println(WiFi.localIP());
-            digitalWrite(buildinLED, LOW);
-        }
-        reconnectCount = 0;
-    }
-}
-
-void checkMqtt() {
-    if(mqttClient.connected()) return;
-
-    Serial.println("MQTT reconnect");
-    if (mqttClient.connect(clientId, mosquittoUser, mosquittoPassword)) {
-        // increase interval after first connect
-        Serial.println("MQTT connected");
-        tickerCheckMqtt.interval(checkMqttInterval);
-    } else {
-        Serial.print("failed, rc=");
-        Serial.print(mqttClient.state());
-    }
-    mqttClient.subscribe(topicSubTargetTemp);
-    mqttClient.subscribe(topicSubCommand);
-    mqttClient.subscribe(topicSubReset);
-    mqttClient.subscribe(topicSubKp);
-    mqttClient.subscribe(topicSubKd);
-    mqttClient.subscribe(topicSubKi);
-    mqttClient.subscribe(topicSubOn);
 }
 
 void reportStatus() {
@@ -554,14 +455,6 @@ void setup() {
 
     Serial.begin(115200);
 
-    Serial.println("Booting");
-    WiFi.mode(WIFI_STA);
-    WiFi.begin(ssid, password);
-
-    checkWiFi();
-
-    setupOTA();
-
     // prepare the display
     display.init();
     display.clear();
@@ -582,22 +475,15 @@ void setup() {
     heaterPID.setBangBang(5); // run the heater full bang until 5°c below targetTemperature
     heaterPID.setTimeStep(1000); // run pid calculation every n seconds
 
-    mqttClient.setServer(mqttServer, mqttPort);
-    mqttClient.setCallback(mqttCallback);
-
-    // start all tickers
-    for(uint8_t i = 0; i < tickerCount; i++) {
-        tickers[i].start();
-    }
+    IotBase::setup();
 }
 
 void loop() {
-    //scan();
-    ArduinoOTA.handle();
-    mqttClient.loop();
+    IotBase::loop();
+
     heaterPID.run();
 
-    // checkk all tickers
+    // check all tickers
     for(uint8_t i = 0; i < tickerCount; i++) {
         tickers[i].update();
     }
