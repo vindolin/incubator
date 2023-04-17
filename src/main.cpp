@@ -119,22 +119,18 @@ void drawGraph();
 void reportStatus();
 void updateHeater();
 
-const uint16_t measureTempInterval = 1000;
-Ticker tickerTemp = Ticker(measureTemp, measureTempInterval);
+const uint16_t measureTempInterval = 1 * TASK_SECOND;
+Task taskMeasureTemp(measureTempInterval, TASK_FOREVER, measureTemp);
 
 uint8_t checkFanInterval = 1;
 uint16_t minFanRpm = 2000;
 uint16_t fanRpm = 0;
 
-Ticker tickers[] = {
-    Ticker(flashWifi, 1 * SECONDS),
-    tickerTemp,
-    Ticker(checkFan, checkFanInterval * SECONDS),
-    Ticker(drawGraph, 5 * SECONDS),
-    Ticker(reportStatus, 10 * SECONDS),
-    Ticker(updateHeater, 1 * SECONDS)
-};
-size_t tickerCount = sizeof(tickers) / sizeof(tickers[0]);
+Task taskFlashWifi(1 * TASK_SECOND, TASK_FOREVER, flashWifi);
+Task taskCheckFan(checkFanInterval * TASK_SECOND, TASK_FOREVER, checkFan);
+Task taskDrawGraph(5 * TASK_SECOND, TASK_FOREVER, drawGraph);
+Task taskReportStatus(10 * TASK_SECOND, TASK_FOREVER, reportStatus);
+Task taskUpdateHeater(1 * TASK_SECOND, TASK_FOREVER, updateHeater);
 
 AutoPID heaterPID(&currentTemp, &targetTemp, &heaterVal, OUTPUT_MIN, OUTPUT_MAX, kp, ki, kd);
 SSD1306Wire display(0x3c, oledSDSPin, oledSCLPin);
@@ -154,13 +150,12 @@ const uint8_t tempHistorySize = graphWidth - 2; // without 2 pixels for the fram
 
 int tempHistory[tempHistorySize];
 char tmpBuffer[32];
-long counter = 0;
 bool measureTempMode = true;
 bool validMeasurement = false;
 
 volatile uint16_t halfRevolutions = 0;
 
-ICACHE_RAM_ATTR void onTacho() {
+IRAM_ATTR void onTacho() {
     halfRevolutions++;
 }
 
@@ -304,13 +299,13 @@ void reportStatus() {
 void measureTemp() {
     // start a new measurement and in the next run get the result
     if(measureTempMode) {
-        tickerTemp.interval(measureTempInterval);
+        taskMeasureTemp.setInterval(measureTempInterval);
         sensors.requestTemperaturesByIndex(0);
         measureTempMode = false;
 
     // read the result
     } else {
-        tickerTemp.interval(0);
+        taskMeasureTemp.setInterval(0);
         measuredTemp = sensors.getTempCByIndex(0);
         if(measuredTemp >= shutdownTemperature) {
             Serial.println(measuredTemp);
@@ -415,6 +410,12 @@ void flashWifi() {
     wifiIconVisible = !wifiIconVisible;
 }
 
+void firstMqttCallback() {}
+void mqttCallback(char* topic, byte* _payload) {
+    taskReportStatus.enable();
+}
+void connectCallback() {}
+
 void setup() {
     delay(3 * SECONDS);
     Serial.println("start");
@@ -475,16 +476,30 @@ void setup() {
     heaterPID.setBangBang(5); // run the heater full bang until 5°c below targetTemperature
     heaterPID.setTimeStep(1000); // run pid calculation every n seconds
 
-    IotBase::setup();
+    IotBase_setup(
+        connectCallback,
+        subTopics,
+        sizeof(subTopics) / sizeof(subTopics[0]),
+        mqttCallback,
+        firstMqttCallback
+    );
+    runner.addTask(taskMeasureTemp);
+    taskMeasureTemp.enable();
+
+    runner.addTask(taskFlashWifi);
+    taskFlashWifi.enable();
+
+    runner.addTask(taskCheckFan);
+    taskCheckFan.enable();
+
+    runner.addTask(taskReportStatus);
+
+    runner.addTask(taskUpdateHeater);
+    taskUpdateHeater.enable();
+
 }
 
 void loop() {
-    IotBase::loop();
-
+    IotBase_loop();
     heaterPID.run();
-
-    // check all tickers
-    for(uint8_t i = 0; i < tickerCount; i++) {
-        tickers[i].update();
-    }
 }
