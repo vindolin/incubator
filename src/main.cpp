@@ -8,8 +8,6 @@
 
 #include <font.h>  // Dialog_plain_13
 
-#define EEPROM_SIZE 4  // holds only targetTemp atm
-
 #ifdef ESP32
     const uint8_t buildinLED = 2;
     const uint8_t oledSDSPin = 4;
@@ -34,13 +32,13 @@
 
 const char* CLIENT_ID = "incubator";
 
-char topicSubTargetTemp[] = "incubator/target_temp";
-char topicSubCommand[] = "incubator/cmd";
-char topicSubReset[] = "incubator/reset";
-char topicSubKp[] = "incubator/kp";
-char topicSubKd[] = "incubator/kd";
-char topicSubKi[] = "incubator/ki";
-char topicSubOn[] = "incubator/on";
+char topicSubTargetTemp[] = "/target_temp";
+char topicSubCommand[] = "/cmd";
+char topicSubReset[] = "/reset";
+char topicSubKp[] = "/kp";
+char topicSubKd[] = "/kd";
+char topicSubKi[] = "/ki";
+char topicSubOn[] = "/on";
 
 char* subTopics[] = {
     topicSubTargetTemp,
@@ -51,19 +49,19 @@ char* subTopics[] = {
     topicSubKi,
     topicSubOn,
 };
-size_t subTopicCount = sizeof(subTopics) / sizeof(subTopics[0]);
+char commands[] = "openValve, closeValve, setTargetMoisture, setOpenDuration, setCheckInterval, measure";
 
-char topicPubEchoOnState[] = "incubator/_echo/on_state";
-char topicPubEchoTargetTemp[] = "incubator/_echo/target_temp";
-char topicPubEchoKp[] = "incubator/_echo/kp";
-char topicPubEchoKd[] = "incubator/_echo/kd";
-char topicPubEchoKi[] = "incubator/_echo/ki";
-char topicPubEchoReset[] = "incubator/_echo/reset";
+char topicPubEchoOnState[] = "/_echo/on_state";
+char topicPubEchoTargetTemp[] = "/_echo/target_temp";
+char topicPubEchoKp[] = "/_echo/kp";
+char topicPubEchoKd[] = "/_echo/kd";
+char topicPubEchoKi[] = "/_echo/ki";
+char topicPubEchoReset[] = "/_echo/reset";
 
-char topicPubTemp[] = "incubator/temp";
-char topicPubRssi[] = "incubator/rssi";
-char topicPubRpm[] = "incubator/rpm";
-char topicPubHeater[] = "incubator/heater";
+char topicPubTemp[] = "/temp";
+char topicPubRssi[] = "/rssi";
+char topicPubRpm[] = "/rpm";
+char topicPubHeater[] = "/heater";
 
 const uint8_t tempResolution = 12;
 
@@ -79,13 +77,17 @@ bool onState = true;
 const uint8_t shutdownTemperature = 50;
 double lastHeaterVal = 0;
 double heaterVal = 0;
-double targetTemp = 34.00;  // this will be written to flash when changed over MQTT
+uint settingsAddr = 32; // behind IotBase
 double measuredTemp = 0;
 double currentTemp = 0;
 double lastTemp = 0;
 uint8_t lastHeaterPercent = 0;
 uint8_t heaterPercent = 0;
 uint8_t welcomeCleared = false;
+
+struct {
+    double targetTemp = 34.00;
+} settings;
 
 OneWire oneWire(tempSensorPin);
 DallasTemperature sensors(&oneWire);
@@ -110,9 +112,7 @@ float kp = 850.0;
 float kd = 250.0;
 float ki = 0.1;
 
-void checkWiFi();
 void flashWifi();
-void checkMqtt();
 void measureTemp();
 void checkFan();
 void drawGraph();
@@ -132,7 +132,7 @@ Task taskDrawGraph(5 * TASK_SECOND, TASK_FOREVER, drawGraph);
 Task taskReportStatus(10 * TASK_SECOND, TASK_FOREVER, reportStatus);
 Task taskUpdateHeater(1 * TASK_SECOND, TASK_FOREVER, updateHeater);
 
-AutoPID heaterPID(&currentTemp, &targetTemp, &heaterVal, OUTPUT_MIN, OUTPUT_MAX, kp, ki, kd);
+AutoPID heaterPID(&currentTemp, &settings.targetTemp, &heaterVal, OUTPUT_MIN, OUTPUT_MAX, kp, ki, kd);
 SSD1306Wire display(0x3c, oledSDSPin, oledSCLPin);
 
 // I'm using an OLED display with two color regions,
@@ -168,69 +168,6 @@ void setOnState(bool state) {
         heaterVal = 0;
         onState = false;
     }
-}
-
-void mqttCallback(char* topic, byte* payload, unsigned int length) {
-    payload[length] = '\0';
-
-    Serial.print("receiving: ");
-    Serial.print(topic);
-    Serial.print(' ');
-    Serial.println((char*)payload);
-
-    // publish((char*)"incubator/_echo/rcv", (char*)payload);
-
-    if(strcmp(topic, topicSubTargetTemp) == 0) {
-        targetTemp = atof((char*)payload);
-        if(targetTemp > 50) {
-            return;
-        } else if(targetTemp < 1) {
-            setOnState(false);
-        } else {
-            setOnState(true);
-        }
-
-        EEPROM.write(0, targetTemp);
-        EEPROM.commit();
-        publish(topicPubEchoTargetTemp, targetTemp);
-    }
-
-    else if(strcmp(topic, topicSubOn) == 0) {
-        bool state = atoi((char*)payload) > 0;
-        setOnState(state);
-        publish(topicPubEchoOnState, onState);
-    }
-
-    else if(strcmp(topic, topicSubKp) == 0) {
-        kp = atof((char*)payload);
-        heaterPID.setGains(kp, ki, kd);
-        publish(topicPubEchoKp, kp);
-    }
-
-    else if(strcmp(topic, topicSubKd) == 0) {
-        kd = atof((char*)payload);
-        heaterPID.setGains(kp, ki, kd);
-        publish(topicPubEchoKd, kd);
-    }
-
-    else if(strcmp(topic, topicSubKi) == 0) {
-        ki = atof((char*)payload);
-        heaterPID.setGains(kp, ki, kd);
-        publish(topicPubEchoKi, ki);
-    }
-
-    else if(strcmp(topic, topicSubReset) == 0) {
-        publish(topicPubEchoReset, (char*) "reset");
-        ESP.restart();
-    }
-
-    // else if(strcmp(topic, topicSubCommand) == 0) {
-    // 	publish((char *)"incubator/_echo/cmd", (char*)payload);
-    // 	if(strcmp((char*)payload, "reset") == 0) {
-    //     	ESP.restart();
-    //     }
-    // }
-    // mqttClient.loop();
 }
 
 void publishTemp() {
@@ -332,7 +269,7 @@ void measureTemp() {
             display.fillRect(0, 0, display.getWidth() - 9, 16);
             display.setColor(WHITE);
 
-            sprintf(tmpBuffer, "%2.2f°/%d°@%d%%", currentTemp, int(targetTemp), heaterPercent);
+            sprintf(tmpBuffer, "%2.2f°/%d°@%d%%", currentTemp, int(settings.targetTemp), heaterPercent);
             display.drawString(0, 0, tmpBuffer);
             display.display();
         } else {
@@ -347,10 +284,12 @@ void measureTemp() {
         measureTempMode = true;
     }
 }
+
+
 void drawGraph() {
-    memcpy(tempHistory, &tempHistory[1], sizeof(tempHistory) - sizeof(int));
+    memmove(tempHistory, &tempHistory[1], sizeof(tempHistory) - sizeof(int));
     if(validMeasurement) {
-        tempHistory[tempHistorySize - 1] = currentTemp;
+        tempHistory[tempHistorySize - 1] = (int)currentTemp;
     } else {
         tempHistory[tempHistorySize - 1] = 0;
     }
@@ -410,10 +349,69 @@ void flashWifi() {
     wifiIconVisible = !wifiIconVisible;
 }
 
-void firstMqttCallback() {}
-void mqttCallback(char* topic, byte* _payload) {
+void firstMqttCallback() {
     taskReportStatus.enable();
+
+    publish(topicPubEchoTargetTemp, settings.targetTemp);
+    publish(topicPubEchoOnState, onState);
+    publish(topicPubEchoKp, kp);
+    publish(topicPubEchoKd, kd);
+    publish(topicPubEchoKi, ki);
 }
+
+void mqttCallback(char* topic, byte* payload) {
+  Serial.print("receiving: ");
+    Serial.print(topic);
+    Serial.print(' ');
+    Serial.println((char*)payload);
+
+    // publish((char*)"incubator/_echo/rcv", (char*)payload);
+
+    if(compareTopic(topic, topicSubTargetTemp)) {
+        settings.targetTemp = atof((char*)payload);
+        if(settings.targetTemp > 50) {
+            return;
+        } else if(settings.targetTemp < 1) {
+            setOnState(false);
+        } else {
+            setOnState(true);
+        }
+
+        EEPROM.put(settingsAddr, settings);
+        EEPROM.commit();
+        publish(topicPubEchoTargetTemp, settings.targetTemp);
+    }
+
+    else if(compareTopic(topic, topicSubOn)) {
+        bool state = atoi((char*)payload) > 0;
+        setOnState(state);
+        publish(topicPubEchoOnState, onState);
+    }
+
+    else if(compareTopic(topic, topicSubKp)) {
+        kp = atof((char*)payload);
+        heaterPID.setGains(kp, ki, kd);
+        publish(topicPubEchoKp, kp);
+    }
+
+    else if(compareTopic(topic, topicSubKd)) {
+        kd = atof((char*)payload);
+        heaterPID.setGains(kp, ki, kd);
+        publish(topicPubEchoKd, kd);
+    }
+
+    else if(compareTopic(topic, topicSubKi)) {
+        ki = atof((char*)payload);
+        heaterPID.setGains(kp, ki, kd);
+        publish(topicPubEchoKi, ki);
+    }
+
+    else if(compareTopic(topic, topicSubReset)) {
+        publish(topicPubEchoReset, (char*) "reset");
+        ESP.restart();
+    }
+}
+
 void connectCallback() {}
 
 void setup() {
@@ -446,9 +444,6 @@ void setup() {
 
     // scan();
     // initOled();  // only needed for a special ESP32/OLED Board
-
-    EEPROM.begin(EEPROM_SIZE);
-    targetTemp = EEPROM.read(0);
 
     // TODO
     // pinMode(fanTachoPin, INPUT_PULLUP);
@@ -483,6 +478,9 @@ void setup() {
         mqttCallback,
         firstMqttCallback
     );
+
+    EEPROM.get(settingsAddr, settings);
+
     runner.addTask(taskMeasureTemp);
     taskMeasureTemp.enable();
 
@@ -491,6 +489,9 @@ void setup() {
 
     runner.addTask(taskCheckFan);
     taskCheckFan.enable();
+
+    runner.addTask(taskDrawGraph);
+    taskDrawGraph.enable();
 
     runner.addTask(taskReportStatus);
 
