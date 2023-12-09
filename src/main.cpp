@@ -1,5 +1,10 @@
 #include <IotBase.h>
 
+// PIN 4/5 would have to be free for I2C
+#ifdef USE_HTU21DF
+#include <Adafruit_HTU21DF.h>
+#endif
+
 #include <DallasTemperature.h>
 #include <AutoPID.h>
 #include <EEPROM.h>
@@ -10,7 +15,7 @@
 
 #ifdef ESP32
     const uint8_t buildinLED = 2;
-    const uint8_t oledSDSPin = 4;
+    const uint8_t oledSDAPin = 4;
     const uint8_t oledSCLPin = 15;
     const uint8_t heaterPin = 22;
     const uint8_t tempSensorPin = 26;
@@ -19,7 +24,7 @@
     const uint8_t servoPin= 19;
 #else
     const uint8_t buildinLED = 2;
-    const uint8_t oledSDSPin = 13;
+    const uint8_t oledSDAPin = 13;
     const uint8_t oledSCLPin = 12;
     const uint8_t heaterPin = 4;
     const uint8_t tempSensorPin = 5;
@@ -28,42 +33,50 @@
     const uint8_t servoPin = 10;
 #endif
 
+
 #define SECONDS 1000
 
 const char* CLIENT_ID = "incubator";
 
-char topicSubTargetTemp[] = "/target_temp";
+char topicSubTargetTemp[] = "/set/target_temp";
+char topicSubKp[] = "/set/kp";
+char topicSubKd[] = "/set/kd";
+char topicSubKi[] = "/set/ki";
+char topicSubOn[] = "/set/on";
+
 char topicSubCommand[] = "/cmd";
-char topicSubReset[] = "/reset";
-char topicSubKp[] = "/kp";
-char topicSubKd[] = "/kd";
-char topicSubKi[] = "/ki";
-char topicSubOn[] = "/on";
 
 char* subTopics[] = {
     topicSubTargetTemp,
-    topicSubCommand,
-    topicSubReset,
     topicSubKp,
     topicSubKd,
     topicSubKi,
     topicSubOn,
+
+    topicSubCommand,
 };
 char commands[] = "openValve, closeValve, setTargetMoisture, setOpenDuration, setCheckInterval, measure";
 
-char topicPubEchoOnState[] = "/_echo/on_state";
-char topicPubEchoTargetTemp[] = "/_echo/target_temp";
-char topicPubEchoKp[] = "/_echo/kp";
-char topicPubEchoKd[] = "/_echo/kd";
-char topicPubEchoKi[] = "/_echo/ki";
-char topicPubEchoReset[] = "/_echo/reset";
+char topicPubEchoOnState[] = "/on_state";
+char topicPubEchoTargetTemp[] = "/target_temp";
+char topicPubEchoKp[] = "/kp";
+char topicPubEchoKd[] = "/kd";
+char topicPubEchoKi[] = "/ki";
 
 char topicPubTemp[] = "/temp";
-char topicPubRssi[] = "/rssi";
 char topicPubRpm[] = "/rpm";
 char topicPubHeater[] = "/heater";
 
+char topicPubHumidity[] = "/humidity";
+
 const uint8_t tempResolution = 12;
+
+#ifdef USE_HTU21DF
+char topicPubTemp2[] = "/temp2";
+Adafruit_HTU21DF htu = Adafruit_HTU21DF();
+float humidity;
+float temp2;
+#endif
 
 const int pwmFreq = 20;
 
@@ -112,8 +125,11 @@ float kp = 850.0;
 float kd = 250.0;
 float ki = 0.1;
 
+uint reportCounter = 0;
+
 void flashWifi();
 void measureTemp();
+void measureHumidity();
 void checkFan();
 void drawGraph();
 void reportStatus();
@@ -121,6 +137,10 @@ void updateHeater();
 
 const uint16_t measureTempInterval = 1 * TASK_SECOND;
 Task taskMeasureTemp(measureTempInterval, TASK_FOREVER, measureTemp);
+
+#ifdef USE_HTU21DF
+Task taskMeasureHumidity(30 * TASK_SECOND, TASK_FOREVER, measureHumidity);
+#endif
 
 uint8_t checkFanInterval = 1;
 uint16_t minFanRpm = 2000;
@@ -133,7 +153,7 @@ Task taskReportStatus(10 * TASK_SECOND, TASK_FOREVER, reportStatus);
 Task taskUpdateHeater(1 * TASK_SECOND, TASK_FOREVER, updateHeater);
 
 AutoPID heaterPID(&currentTemp, &settings.targetTemp, &heaterVal, OUTPUT_MIN, OUTPUT_MAX, kp, ki, kd);
-SSD1306Wire display(0x3c, oledSDSPin, oledSCLPin);
+SSD1306Wire display(0x3c, oledSDAPin, oledSCLPin);
 
 // I'm using an OLED display with two color regions,
 const uint8_t displayWidth = 128;
@@ -173,11 +193,11 @@ void setOnState(bool state) {
 void publishTemp() {
     Serial.print("temp: ");
     Serial.println(currentTemp);
-    publish(topicPubTemp, currentTemp);
+    publish(topicPubTemp, currentTemp, true);
 }
 
 void publishHeater() {
-    publish(topicPubHeater, heaterPercent);
+    publish(topicPubHeater, heaterPercent, true);
 }
 
 void initOled() {
@@ -227,10 +247,13 @@ void updateHeater() {
 }
 
 void reportStatus() {
-    publish(topicPubRssi, WiFi.RSSI());
-    publish(topicPubRpm, fanRpm);
+    publish(topicPubRpm, fanRpm, true);
     publishTemp();
     publishHeater();
+
+    if(reportCounter++ % 100 == 0) {
+        publish("target_temp", settings.targetTemp);
+    }
 }
 
 void measureTemp() {
@@ -285,6 +308,19 @@ void measureTemp() {
     }
 }
 
+#ifdef USE_HTU21DF
+void measureHumidity() {
+    humidity = htu.readHumidity();
+    if(humidity > 0.1) {
+        publish(topicPubHumidity, humidity, true);
+    }
+
+    temp2 = htu.readTemperature();
+    if(temp2 > 0.1) {
+        publish(topicPubTemp2, temp2, true);
+    }
+}
+#endif
 
 void drawGraph() {
     memmove(tempHistory, &tempHistory[1], sizeof(tempHistory) - sizeof(int));
@@ -406,10 +442,6 @@ void mqttCallback(char* topic, byte* payload) {
         publish(topicPubEchoKi, ki);
     }
 
-    else if(compareTopic(topic, topicSubReset)) {
-        publish(topicPubEchoReset, (char*) "reset");
-        ESP.restart();
-    }
 }
 
 void connectCallback() {}
@@ -483,6 +515,12 @@ void setup() {
 
     runner.addTask(taskMeasureTemp);
     taskMeasureTemp.enable();
+
+    #ifdef USE_HTU21DF
+    runner.addTask(taskMeasureHumidity);
+    taskMeasureHumidity.enable();
+    taskMeasureHumidity.forceNextIteration();
+    #endif
 
     runner.addTask(taskFlashWifi);
     taskFlashWifi.enable();
