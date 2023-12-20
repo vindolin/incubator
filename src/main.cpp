@@ -181,9 +181,11 @@ AutoPID coolerPID(&currentTemp, &settings.targetTemp, &servoVal, SERVO_MIN, SERV
 
 float currentTempQ = 0;
 float heaterValQ = 0;
-float targetTempQ = 30;
+float targetTempQ = 35;
+uint8_t heaterPercentQ = 0;
 
-// QuickPID qHeaterPID(&currentTempQ, &heaterValQ, &targetTempQ, heat_kp, heat_ki, heat_kd);
+//float Kp = 2, Ki = 5, Kd = 1;
+QuickPID heaterPidQ(&currentTempQ, &heaterValQ, &targetTempQ, 2, 5, 1, QuickPID::Action::direct);
 
 SSD1306Wire display(0x3c, oledSDAPin, oledSCLPin);
 
@@ -231,6 +233,7 @@ void publishTemp() {
 
 void publishHeater() {
     publish(topicPubHeater, heaterPercent, true);
+    publish("/heater_q", heaterPercentQ, true);
 }
 
 void publishCooler() {
@@ -259,18 +262,22 @@ void setCooler(int value) {
 }
 
 void updateHeater() {
+    publish("/heater_qq", heaterValQ);
+
     if(settings.onState && validMeasurement && fanRpm >= minFanRpm) {
         if(heaterVal != lastHeaterVal) {
             lastHeaterVal = heaterVal;
             publish("/heater_raw", heaterVal, true);
             setHeater(heaterVal);
             heaterPercent = heaterVal * 100 / OUTPUT_MAX;
+            heaterPercentQ = heaterValQ * 100 / OUTPUT_MAX;
         }
 
     // safety feature
     } else {
         heaterVal = 0;
         heaterPercent = 0;
+        heaterPercentQ = 0;
         lastHeaterVal = 0;
         setHeater(0);
     }
@@ -331,15 +338,9 @@ void measureTemp() {
                 welcomeCleared = true;
             }
 
-            currentTemp = measuredTemp;
-            filter.add(currentTemp);
+            filter.add(measuredTemp);
             currentTemp = filter.get();
-
-            if(currentTemp > settings.targetTemp) {
-                currentOverTemp = currentTemp - settings.targetTemp;
-            } else {
-                currentOverTemp = 0;
-            }
+            currentTempQ = filter.get();
 
             display.setColor(BLACK);
             display.fillRect(0, 0, display.getWidth() - 9, 16);
@@ -532,8 +533,11 @@ void setup() {
 
     DeviceAddress tempDeviceAddress;
 
+    heaterPidQ.SetOutputLimits(OUTPUT_MIN, OUTPUT_MAX);
+
     setHeater(0);
     setCooler(0);
+
 
     sensors.begin();
     sensors.getAddress(tempDeviceAddress, 0);
@@ -571,6 +575,8 @@ void setup() {
     heaterPID.setTimeStep(1000); // run pid calculation every n seconds
 
     coolerPID.setTimeStep(1000); // run pid calculation every n seconds
+
+    heaterPidQ.SetMode(QuickPID::Control::automatic);
 
     IotBase_setup(
         connectCallback,
@@ -613,4 +619,5 @@ void setup() {
 void loop() {
     IotBase_loop();
     heaterPID.run();
+    heaterPidQ.Compute();
 }
