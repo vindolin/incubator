@@ -39,39 +39,52 @@
 const char* CLIENT_ID = "incubator";
 
 char topicSubTargetTemp[] = "/set/target_temp";
-char topicSubKp[] = "/set/kp";
-char topicSubKd[] = "/set/kd";
-char topicSubKi[] = "/set/ki";
-char topicSubOn[] = "/set/on";
+char topicSubHeatKp[] = "/set/heat_kp";
+char topicSubHeatKd[] = "/set/heat_kd";
+char topicSubHeatKi[] = "/set/heat_ki";
 
-char topicSubCommand[] = "/cmd";
+char topicSubCoolKp[] = "/set/cool_kp";
+char topicSubCoolKd[] = "/set/cool_kd";
+char topicSubCoolKi[] = "/set/cool_ki";
+
+char topicSubOnState[] = "/set/on_state";
 
 char* subTopics[] = {
     topicSubTargetTemp,
-    topicSubKp,
-    topicSubKd,
-    topicSubKi,
-    topicSubOn,
 
-    topicSubCommand,
+    topicSubHeatKp,
+    topicSubHeatKd,
+    topicSubHeatKi,
+
+    topicSubCoolKp,
+    topicSubCoolKd,
+    topicSubCoolKi,
+
+    topicSubOnState,
 };
-char commands[] = "openValve, closeValve, setTargetMoisture, setOpenDuration, setCheckInterval, measure";
+char commands[] = "set/target_temp";
 
-char topicPubEchoOnState[] = "/on_state";
-char topicPubEchoTargetTemp[] = "/target_temp";
-char topicPubEchoKp[] = "/kp";
-char topicPubEchoKd[] = "/kd";
-char topicPubEchoKi[] = "/ki";
+char topicPubOnState[] = "/on_state";
+char topicPubTargetTemp[] = "/target_temp";
+
+char topicPubHeatKp[] = "/heat_kp";
+char topicPubHeatKd[] = "/heat_kd";
+char topicPubHeatKi[] = "/heat_ki";
+
+char topicPubCoolKp[] = "/cool_kp";
+char topicPubCoolKd[] = "/cool_kd";
+char topicPubCoolKi[] = "/cool_ki";
 
 char topicPubTemp[] = "/temp";
 char topicPubRpm[] = "/rpm";
-char topicPubHeater[] = "/heater";
 
-char topicPubHumidity[] = "/humidity";
+char topicPubHeater[] = "/heater";
+char topicPubCooler[] = "/cooler";
 
 const uint8_t tempResolution = 12;
 
 #ifdef USE_HTU21DF
+char topicPubHumidity[] = "/humidity";
 char topicPubTemp2[] = "/temp2";
 Adafruit_HTU21DF htu = Adafruit_HTU21DF();
 float humidity;
@@ -85,27 +98,32 @@ const int pwmFreq = 20;
     const int resolution = 8;
 #endif
 
-bool onState = true;
-
 const uint8_t shutdownTemperature = 50;
+
 double lastHeaterVal = 0;
 double heaterVal = 0;
+
+double lastServoVal = 0;
+double servoVal = 0;
+
 uint settingsAddr = 32; // behind IotBase
 double measuredTemp = 0;
 double currentTemp = 0;
+double currentOverTemp = 0;
 double lastTemp = 0;
-uint8_t lastHeaterPercent = 0;
 uint8_t heaterPercent = 0;
+uint8_t coolerPercent = 0;
 uint8_t welcomeCleared = false;
 
 struct {
     double targetTemp = 34.00;
+    bool onState = false;
 } settings;
 
 OneWire oneWire(tempSensorPin);
 DallasTemperature sensors(&oneWire);
 
-MovingAverageFloat <8> filter;
+MovingAverageFloat<8> filter;
 
 // PID settings
 #define OUTPUT_MIN 0
@@ -114,6 +132,8 @@ MovingAverageFloat <8> filter;
 #else
     #define OUTPUT_MAX 1023
 #endif
+#define SERVO_MIN 0
+#define SERVO_MAX 180
 
 bool wifiIconVisible = false;
 static unsigned char wifiIconBits[] = {
@@ -121,11 +141,13 @@ static unsigned char wifiIconBits[] = {
    0x38, 0x00, 0x10, 0x00
 };
 
-float kp = 850.0;
-float kd = 250.0;
-float ki = 0.1;
+float heat_kp = 850.0;
+float heat_kd = 250.0;
+float heat_ki = 0.1;
 
-uint reportCounter = 0;
+float cool_kp = -850.0;
+float cool_kd = -250.0;
+float cool_ki = -0.1;
 
 void flashWifi();
 void measureTemp();
@@ -134,6 +156,7 @@ void checkFan();
 void drawGraph();
 void reportStatus();
 void updateHeater();
+void updateCooler();
 
 const uint16_t measureTempInterval = 1 * TASK_SECOND;
 Task taskMeasureTemp(measureTempInterval, TASK_FOREVER, measureTemp);
@@ -151,8 +174,11 @@ Task taskCheckFan(checkFanInterval * TASK_SECOND, TASK_FOREVER, checkFan);
 Task taskDrawGraph(5 * TASK_SECOND, TASK_FOREVER, drawGraph);
 Task taskReportStatus(10 * TASK_SECOND, TASK_FOREVER, reportStatus);
 Task taskUpdateHeater(1 * TASK_SECOND, TASK_FOREVER, updateHeater);
+Task taskUpdateCooler(1 * TASK_SECOND, TASK_FOREVER, updateCooler);
 
-AutoPID heaterPID(&currentTemp, &settings.targetTemp, &heaterVal, OUTPUT_MIN, OUTPUT_MAX, kp, ki, kd);
+AutoPID heaterPID(&currentTemp, &settings.targetTemp, &heaterVal, OUTPUT_MIN, OUTPUT_MAX, heat_kp, heat_ki, heat_kd);
+AutoPID coolerPID(&currentTemp, &settings.targetTemp, &servoVal, SERVO_MIN, SERVO_MAX, cool_kp, cool_ki, cool_kd);
+
 SSD1306Wire display(0x3c, oledSDAPin, oledSCLPin);
 
 // I'm using an OLED display with two color regions,
@@ -182,12 +208,13 @@ IRAM_ATTR void onTacho() {
 void setOnState(bool state) {
     if(state) {
         heaterPID.run();
-        onState = true;
+        coolerPID.run();
     } else {
         heaterPID.stop();
-        heaterVal = 0;
-        onState = false;
+        coolerPID.stop();
     }
+    settings.onState = state;
+    publish(topicPubOnState, settings.onState ? "ON" : "OFF", true);
 }
 
 void publishTemp() {
@@ -200,6 +227,10 @@ void publishHeater() {
     publish(topicPubHeater, heaterPercent, true);
 }
 
+void publishCooler() {
+    publish(topicPubCooler, coolerPercent, true);
+}
+
 void initOled() {
     pinMode(16,OUTPUT);
     digitalWrite(16, LOW);
@@ -208,41 +239,54 @@ void initOled() {
 }
 
 void setHeater(int value) {
-    Serial.print("setting heater to: ");
-    Serial.println(value);
 #ifdef ESP32
     ledcWrite(ledChannel, value);
 #else
     analogWrite(heaterPin, value);
 #endif
+    publishHeater();
+}
+
+void setCooler(int value) {
+    // todo servo.write(value);
+    publishCooler();
 }
 
 void updateHeater() {
-    // Serial.println("heater");
-    // Serial.print("valid: ");
-    // Serial.println(validMeasurement);
-    // Serial.print("heaterVal: ");
-    // Serial.println(heaterVal);
-    // Serial.print("lastHeaterVal: ");
-    // Serial.println(lastHeaterVal);
-
-    if(validMeasurement and fanRpm >= minFanRpm) {
-
+    if(settings.onState && validMeasurement && fanRpm >= minFanRpm) {
         if(heaterVal != lastHeaterVal) {
             lastHeaterVal = heaterVal;
-
+            publish("/heater_raw", heaterVal, true);
             setHeater(heaterVal);
             heaterPercent = heaterVal * 100 / OUTPUT_MAX;
-
-            if(heaterPercent != lastHeaterPercent) {
-                lastHeaterPercent = heaterPercent;
-                publishHeater();
-            }
         }
 
     // safety feature
     } else {
+        heaterVal = 0;
+        heaterPercent = 0;
+        lastHeaterVal = 0;
         setHeater(0);
+    }
+}
+
+void updateCooler() {
+    publish("/cooler_raw", servoVal);
+
+    if(settings.onState && validMeasurement) {
+        if(servoVal != lastServoVal) {
+            lastServoVal = servoVal;
+            publish("/cooler_raw", servoVal, true);
+            setCooler(servoVal);
+            coolerPercent = servoVal * 100 / SERVO_MAX;
+        }
+
+    // safety feature
+    } else {
+        servoVal = 0;
+        coolerPercent = 0;
+        lastServoVal = 0;
+        setCooler(0);
     }
 }
 
@@ -250,10 +294,6 @@ void reportStatus() {
     publish(topicPubRpm, fanRpm, true);
     publishTemp();
     publishHeater();
-
-    if(reportCounter++ % 100 == 0) {
-        publish("target_temp", settings.targetTemp);
-    }
 }
 
 void measureTemp() {
@@ -266,6 +306,7 @@ void measureTemp() {
     // read the result
     } else {
         taskMeasureTemp.setInterval(0);
+
         measuredTemp = sensors.getTempCByIndex(0);
         if(measuredTemp >= shutdownTemperature) {
             Serial.println(measuredTemp);
@@ -287,6 +328,12 @@ void measureTemp() {
             currentTemp = measuredTemp;
             filter.add(currentTemp);
             currentTemp = filter.get();
+
+            if(currentTemp > settings.targetTemp) {
+                currentOverTemp = currentTemp - settings.targetTemp;
+            } else {
+                currentOverTemp = 0;
+            }
 
             display.setColor(BLACK);
             display.fillRect(0, 0, display.getWidth() - 9, 16);
@@ -387,12 +434,16 @@ void flashWifi() {
 
 void firstMqttCallback() {
     taskReportStatus.enable();
+    publish(topicPubTargetTemp, settings.targetTemp, true);
+    publish(topicPubOnState, settings.onState ? "ON" : "OFF", true);
+    publish(topicPubHeatKp, heat_kp);
+    publish(topicPubHeatKd, heat_kd);
+    publish(topicPubHeatKi, heat_ki);
+}
 
-    publish(topicPubEchoTargetTemp, settings.targetTemp);
-    publish(topicPubEchoOnState, onState);
-    publish(topicPubEchoKp, kp);
-    publish(topicPubEchoKd, kd);
-    publish(topicPubEchoKi, ki);
+void commitSettings() {
+    EEPROM.put(settingsAddr, settings);
+    EEPROM.commit();
 }
 
 void mqttCallback(char* topic, byte* payload) {
@@ -405,7 +456,7 @@ void mqttCallback(char* topic, byte* payload) {
 
     if(compareTopic(topic, topicSubTargetTemp)) {
         settings.targetTemp = atof((char*)payload);
-        if(settings.targetTemp > 50) {
+        if(settings.targetTemp > 45) {
             return;
         } else if(settings.targetTemp < 1) {
             setOnState(false);
@@ -413,33 +464,47 @@ void mqttCallback(char* topic, byte* payload) {
             setOnState(true);
         }
 
-        EEPROM.put(settingsAddr, settings);
-        EEPROM.commit();
-        publish(topicPubEchoTargetTemp, settings.targetTemp);
+        commitSettings();
+        publish(topicPubTargetTemp, settings.targetTemp, true);
     }
 
-    else if(compareTopic(topic, topicSubOn)) {
-        bool state = atoi((char*)payload) > 0;
+    else if(compareTopic(topic, topicSubOnState)) {
+        bool state = (strcmp((char*)payload, "ON") == 0);
         setOnState(state);
-        publish(topicPubEchoOnState, onState);
+        commitSettings();
+        publish(topicPubOnState, settings.onState ? "ON" : "OFF", true);
     }
 
-    else if(compareTopic(topic, topicSubKp)) {
-        kp = atof((char*)payload);
-        heaterPID.setGains(kp, ki, kd);
-        publish(topicPubEchoKp, kp);
+    else if(compareTopic(topic, topicSubHeatKp)) {
+        heat_kp = atof((char*)payload);
+        heaterPID.setGains(heat_kp, heat_ki, heat_kd);
+        publish(topicPubHeatKp, heat_kp);
+    }
+    else if(compareTopic(topic, topicSubHeatKd)) {
+        heat_kd = atof((char*)payload);
+        heaterPID.setGains(heat_kp, heat_ki, heat_kd);
+        publish(topicPubHeatKd, heat_kd);
+    }
+    else if(compareTopic(topic, topicSubHeatKi)) {
+        heat_ki = atof((char*)payload);
+        heaterPID.setGains(heat_kp, heat_ki, heat_kd);
+        publish(topicPubHeatKi, heat_ki);
     }
 
-    else if(compareTopic(topic, topicSubKd)) {
-        kd = atof((char*)payload);
-        heaterPID.setGains(kp, ki, kd);
-        publish(topicPubEchoKd, kd);
+    else if(compareTopic(topic, topicSubCoolKp)) {
+        cool_kp = atof((char*)payload);
+        coolerPID.setGains(cool_kp, cool_ki, cool_kd);
+        publish(topicPubCoolKp, cool_kp);
     }
-
-    else if(compareTopic(topic, topicSubKi)) {
-        ki = atof((char*)payload);
-        heaterPID.setGains(kp, ki, kd);
-        publish(topicPubEchoKi, ki);
+    else if(compareTopic(topic, topicSubCoolKd)) {
+        cool_kd = atof((char*)payload);
+        coolerPID.setGains(cool_kp, cool_ki, cool_kd);
+        publish(topicPubCoolKd, cool_kd);
+    }
+    else if(compareTopic(topic, topicSubCoolKi)) {
+        cool_ki = atof((char*)payload);
+        coolerPID.setGains(cool_kp, cool_ki, cool_kd);
+        publish(topicPubCoolKi, cool_ki);
     }
 
 }
@@ -457,12 +522,12 @@ void setup() {
     analogWriteFreq(pwmFreq);
 #endif
     pinMode(fanTachoPin, INPUT_PULLUP);
-
     attachInterrupt(digitalPinToInterrupt(fanTachoPin), onTacho, FALLING);
 
     DeviceAddress tempDeviceAddress;
 
     setHeater(0);
+    setCooler(0);
 
     sensors.begin();
     sensors.getAddress(tempDeviceAddress, 0);
@@ -476,10 +541,6 @@ void setup() {
 
     // scan();
     // initOled();  // only needed for a special ESP32/OLED Board
-
-    // TODO
-    // pinMode(fanTachoPin, INPUT_PULLUP);
-    // attachInterrupt(digitalPinToInterrupt(fanTachoPin), tachoSignal, RISING);
 
     Serial.begin(115200);
 
@@ -502,6 +563,8 @@ void setup() {
 
     heaterPID.setBangBang(5); // run the heater full bang until 5°c below targetTemperature
     heaterPID.setTimeStep(1000); // run pid calculation every n seconds
+
+    coolerPID.setTimeStep(1000); // run pid calculation every n seconds
 
     IotBase_setup(
         connectCallback,
@@ -535,6 +598,9 @@ void setup() {
 
     runner.addTask(taskUpdateHeater);
     taskUpdateHeater.enable();
+
+    runner.addTask(taskUpdateCooler);
+    taskUpdateCooler.enable();
 
 }
 
