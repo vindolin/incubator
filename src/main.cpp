@@ -10,6 +10,7 @@
 #include <EEPROM.h>
 #include <SSD1306Wire.h>
 #include <MovingAverageFloat.h>
+#include <QuickPID.h>
 
 #include <font.h>  // Dialog_plain_13
 
@@ -109,7 +110,6 @@ double servoVal = 0;
 uint settingsAddr = 32; // behind IotBase
 double measuredTemp = 0;
 double currentTemp = 0;
-double currentOverTemp = 0;
 double lastTemp = 0;
 uint8_t heaterPercent = 0;
 uint8_t coolerPercent = 0;
@@ -178,6 +178,12 @@ Task taskUpdateCooler(1 * TASK_SECOND, TASK_FOREVER, updateCooler);
 
 AutoPID heaterPID(&currentTemp, &settings.targetTemp, &heaterVal, OUTPUT_MIN, OUTPUT_MAX, heat_kp, heat_ki, heat_kd);
 AutoPID coolerPID(&currentTemp, &settings.targetTemp, &servoVal, SERVO_MIN, SERVO_MAX, cool_kp, cool_ki, cool_kd);
+
+float currentTempQ = 0;
+float heaterValQ = 0;
+float targetTempQ = 30;
+
+// QuickPID qHeaterPID(&currentTempQ, &heaterValQ, &targetTempQ, heat_kp, heat_ki, heat_kd);
 
 SSD1306Wire display(0x3c, oledSDAPin, oledSCLPin);
 
